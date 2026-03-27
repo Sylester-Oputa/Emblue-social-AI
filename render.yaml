@@ -11,7 +11,7 @@ services:
     plan: free # Options: free, starter, standard, pro
     rootDir: backend
     buildCommand: npm install && npm run db:generate && npm run build
-    startCommand: npm run migrate:deploy && npm run start:prod
+    startCommand: npm run migrate:deploy && npm run db:seed && npm run start:prod
     healthCheckPath: /api/health
     envVars:
       - key: NODE_ENV
