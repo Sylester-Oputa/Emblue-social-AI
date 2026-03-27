@@ -1,0 +1,776 @@
+// ─────────────────────────────────────────────
+// Emblue Social AI — Prisma Schema
+// ─────────────────────────────────────────────
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ═══════════════════════════════════════
+// ENUMS
+// ═══════════════════════════════════════
+
+enum PlatformType {
+  X
+  INSTAGRAM
+  FACEBOOK
+  TIKTOK
+}
+
+enum ConnectionStatus {
+  ACTIVE
+  EXPIRED
+  REVOKED
+  ERROR
+}
+
+enum IngestionMode {
+  WEBHOOK
+  POLLING
+  MANUAL
+}
+
+enum SignalStatus {
+  RAW
+  NORMALIZED
+  ENRICHED
+  QUALIFIED
+  DISQUALIFIED
+  ACTIONED
+}
+
+enum SentimentLabel {
+  POSITIVE
+  NEGATIVE
+  NEUTRAL
+  MIXED
+}
+
+enum IntentLabel {
+  PURCHASE
+  INQUIRY
+  COMPLAINT
+  PRAISE
+  REQUEST
+  GENERAL
+}
+
+enum PolicyDecisionStatus {
+  ALLOWED
+  ALLOWED_WITH_REVIEW
+  BLOCKED_MODERATION
+  BLOCKED_MISSING_SCOPE
+  BLOCKED_PERMISSION
+  BLOCKED_RATE_LIMIT
+  BLOCKED_POLICY
+}
+
+enum ApprovalStatus {
+  PENDING
+  IN_REVIEW
+  APPROVED
+  REJECTED
+  CHANGES_REQUESTED
+  ESCALATED
+  EXPIRED
+  CANCELLED
+}
+
+enum DraftStatus {
+  DRAFT
+  PENDING_REVIEW
+  APPROVED
+  AUTO_APPROVED
+  REJECTED
+  ESCALATED
+  OVERRIDE_APPROVED
+  SENT
+  FAILED
+}
+
+enum DeliveryStatus {
+  QUEUED
+  IN_PROGRESS
+  DELIVERED
+  FAILED
+  RETRYING
+  CANCELLED
+}
+
+enum CampaignStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+  COMPLETED
+  ARCHIVED
+}
+
+enum ModerationStatus {
+  PASSED
+  FLAGGED
+  BLOCKED
+  PENDING
+}
+
+enum RetryJobStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  FAILED
+  DEAD_LETTER
+}
+
+enum RiskLevel {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum UserRole {
+  SUPER_ADMIN
+  TENANT_ADMIN
+  WORKSPACE_ADMIN
+  ANALYST
+  REVIEWER
+  OPERATOR
+  VIEWER
+}
+
+enum AgentRunStatus {
+  SUCCESS
+  FAILED
+  TIMEOUT
+}
+
+enum RiskEventCategory {
+  HARASSMENT
+  SELF_HARM
+  FRAUD
+  LEGAL_THREAT
+  PII_LEAK
+  OFF_BRAND
+}
+
+enum RiskEventStatus {
+  OPEN
+  ACKNOWLEDGED
+  RESOLVED
+}
+
+// ═══════════════════════════════════════
+// MODELS
+// ═══════════════════════════════════════
+
+model Tenant {
+  id        String   @id @default(uuid())
+  name      String
+  slug      String   @unique
+  settings  Json     @default("{}")
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  workspaces  Workspace[]
+  users       User[]
+  auditLogs   AuditLog[]
+  policyRules PolicyRule[]
+
+  @@map("tenants")
+}
+
+model Workspace {
+  id        String   @id @default(uuid())
+  tenantId  String
+  name      String
+  slug      String
+  isActive  Boolean  @default(true)
+  settings  Json     @default("{}")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Automation controls
+  automationEnabled     Boolean   @default(true)
+  automationPausedBy    String?
+  automationPausedAt    DateTime?
+  automationPauseReason String?
+
+  tenant              Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  memberships         Membership[]
+  brandProfiles       BrandProfile[]
+  platformConnections PlatformConnection[]
+  rawEvents           RawEvent[]
+  normalizedSignals   NormalizedSignal[]
+  campaigns           Campaign[]
+  approvalQueues      ApprovalQueue[]
+  responseDrafts      ResponseDraft[]
+
+  @@unique([tenantId, slug])
+  @@map("workspaces")
+}
+
+model User {
+  id                     String    @id @default(uuid())
+  tenantId               String
+  email                  String    @unique
+  passwordHash           String
+  firstName              String
+  lastName               String
+  role                   UserRole  @default(VIEWER)
+  isActive               Boolean   @default(true)
+  lastLoginAt            DateTime?
+  passwordResetToken     String?
+  passwordResetExpiresAt DateTime?
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+
+  tenant          Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  memberships     Membership[]
+  auditLogs       AuditLog[]       @relation("AuditActor")
+  approvalActions ApprovalAction[]
+  notifications   Notification[]
+
+  @@map("users")
+}
+
+model Membership {
+  id          String   @id @default(uuid())
+  userId      String
+  workspaceId String
+  role        UserRole @default(VIEWER)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, workspaceId])
+  @@map("memberships")
+}
+
+model BrandProfile {
+  id              String    @id @default(uuid())
+  workspaceId     String
+  name            String
+  tone            String    @default("professional")
+  prohibitedTerms String[]  @default([])
+  riskTolerance   RiskLevel @default(MEDIUM)
+  dailyBudget     Int       @default(100)
+  budgetUsedToday Int       @default(0)
+  settings        Json      @default("{}")
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@map("brand_profiles")
+}
+
+model PlatformConnection {
+  id           String           @id @default(uuid())
+  workspaceId  String
+  platform     PlatformType
+  status       ConnectionStatus @default(ACTIVE)
+  accountId    String?
+  accountName  String?
+  isPaused     Boolean          @default(false)
+  lastHealthAt DateTime?
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+
+  workspace   Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  credentials PlatformCredential[]
+  scopes      PlatformScope[]
+  rawEvents   RawEvent[]
+
+  @@map("platform_connections")
+}
+
+model PlatformCredential {
+  id             String    @id @default(uuid())
+  connectionId   String
+  encryptedToken String
+  tokenType      String    @default("access_token")
+  expiresAt      DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  connection PlatformConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@map("platform_credentials")
+}
+
+model PlatformScope {
+  id           String   @id @default(uuid())
+  connectionId String
+  scope        String
+  isGranted    Boolean  @default(true)
+  createdAt    DateTime @default(now())
+
+  connection PlatformConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@unique([connectionId, scope])
+  @@map("platform_scopes")
+}
+
+model RawEvent {
+  id              String        @id @default(uuid())
+  workspaceId     String
+  connectionId    String?
+  platform        PlatformType
+  externalEventId String
+  eventType       String
+  payload         Json
+  checksum        String
+  isDuplicate     Boolean       @default(false)
+  ingestionMode   IngestionMode @default(WEBHOOK)
+  receivedAt      DateTime      @default(now())
+  createdAt       DateTime      @default(now())
+
+  workspace        Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  connection       PlatformConnection? @relation(fields: [connectionId], references: [id])
+  normalizedSignal NormalizedSignal?
+
+  @@unique([platform, externalEventId])
+  @@index([checksum])
+  @@map("raw_events")
+}
+
+model NormalizedSignal {
+  id           String       @id @default(uuid())
+  workspaceId  String
+  rawEventId   String       @unique
+  platform     PlatformType
+  authorId     String?
+  authorName   String?
+  authorHandle String?
+  content      String?
+  contentType  String?
+  actionType   String?
+  parentId     String?
+  externalUrl  String?
+  occurredAt   DateTime?
+  status       SignalStatus @default(NORMALIZED)
+  metadata     Json         @default("{}")
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  workspace        Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  rawEvent         RawEvent          @relation(fields: [rawEventId], references: [id], onDelete: Cascade)
+  sentimentResult  SentimentResult?
+  intentResult     IntentResult?
+  moderationResult ModerationResult?
+  opportunityScore OpportunityScore?
+  policyDecisions  PolicyDecision[]
+  responseDrafts   ResponseDraft[]
+  deliveryAttempts DeliveryAttempt[]
+
+  @@index([workspaceId, status])
+  @@index([workspaceId, platform])
+  @@map("normalized_signals")
+}
+
+model SentimentResult {
+  id         String         @id @default(uuid())
+  signalId   String         @unique
+  label      SentimentLabel
+  score      Float
+  confidence Float
+  createdAt  DateTime       @default(now())
+
+  signal NormalizedSignal @relation(fields: [signalId], references: [id], onDelete: Cascade)
+
+  @@map("sentiment_results")
+}
+
+model IntentResult {
+  id         String      @id @default(uuid())
+  signalId   String      @unique
+  label      IntentLabel
+  score      Float
+  confidence Float
+  createdAt  DateTime    @default(now())
+
+  signal NormalizedSignal @relation(fields: [signalId], references: [id], onDelete: Cascade)
+
+  @@map("intent_results")
+}
+
+model ModerationResult {
+  id         String           @id @default(uuid())
+  signalId   String           @unique
+  status     ModerationStatus
+  reasons    String[]         @default([])
+  confidence Float
+  createdAt  DateTime         @default(now())
+
+  signal NormalizedSignal @relation(fields: [signalId], references: [id], onDelete: Cascade)
+
+  @@map("moderation_results")
+}
+
+model OpportunityScore {
+  id              String   @id @default(uuid())
+  signalId        String   @unique
+  score           Float
+  qualifiedReason String?
+  createdAt       DateTime @default(now())
+
+  signal NormalizedSignal @relation(fields: [signalId], references: [id], onDelete: Cascade)
+
+  @@map("opportunity_scores")
+}
+
+model PolicyRule {
+  id          String   @id @default(uuid())
+  tenantId    String
+  ruleKey     String
+  name        String
+  description String?
+  priority    Int      @default(0)
+  isActive    Boolean  @default(true)
+  config      Json     @default("{}")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, ruleKey])
+  @@map("policy_rules")
+}
+
+model PolicyDecision {
+  id                    String               @id @default(uuid())
+  signalId              String
+  status                PolicyDecisionStatus
+  explanation           String?
+  requiresHumanApproval Boolean              @default(false)
+  riskScore             Int                  @default(0) // 0-100 risk score
+  blockedReasons        String[]             @default([])
+  allowedActions        String[]             @default([])
+  ruleIds               String[]             @default([])
+  evaluatedAt           DateTime             @default(now())
+  createdAt             DateTime             @default(now())
+
+  signal          NormalizedSignal @relation(fields: [signalId], references: [id], onDelete: Cascade)
+  approvalRequest ApprovalRequest?
+
+  @@index([signalId])
+  @@index([status])
+  @@map("policy_decisions")
+}
+
+model ApprovalQueue {
+  id          String   @id @default(uuid())
+  workspaceId String
+  name        String
+  slaHours    Int      @default(24)
+  isDefault   Boolean  @default(false)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  workspace Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  requests  ApprovalRequest[]
+
+  @@map("approval_queues")
+}
+
+model ApprovalRequest {
+  id               String         @id @default(uuid())
+  queueId          String
+  policyDecisionId String         @unique
+  signalId         String?
+  draftId          String?
+  status           ApprovalStatus @default(PENDING)
+  priority         Int            @default(0)
+  slaDeadline      DateTime?
+  resolvedAt       DateTime?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  queue          ApprovalQueue    @relation(fields: [queueId], references: [id], onDelete: Cascade)
+  policyDecision PolicyDecision   @relation(fields: [policyDecisionId], references: [id], onDelete: Cascade)
+  actions        ApprovalAction[]
+  draft          ResponseDraft?   @relation(fields: [draftId], references: [id])
+
+  @@map("approval_requests")
+}
+
+model ApprovalAction {
+  id        String         @id @default(uuid())
+  requestId String
+  actorId   String
+  action    ApprovalStatus
+  comment   String?
+  createdAt DateTime       @default(now())
+
+  request ApprovalRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  actor   User            @relation(fields: [actorId], references: [id])
+
+  @@map("approval_actions")
+}
+
+model ResponseDraft {
+  id               String      @id @default(uuid())
+  workspaceId      String
+  signalId         String
+  campaignId       String?
+  content          String
+  ctaText          String?
+  riskLevel        RiskLevel   @default(MEDIUM)
+  riskScore        Int         @default(0) // 0-100 from policy engine
+  status           DraftStatus @default(DRAFT)
+  version          Int         @default(1)
+  metadata         Json        @default("{}")
+  approvedBy       String? // "system" for auto-approved, userId for manual
+  approvedAt       DateTime?
+  postedAt         DateTime?
+  platformPostId   String? // External post ID from platform
+  platformPostUrl  String? // Direct URL to posted reply
+  overrideDecision Json? // { reviewerId, action, comment, timestamp }
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+
+  workspace        Workspace              @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  signal           NormalizedSignal       @relation(fields: [signalId], references: [id], onDelete: Cascade)
+  campaign         Campaign?              @relation(fields: [campaignId], references: [id])
+  versions         ResponseDraftVersion[]
+  deliveryAttempts DeliveryAttempt[]
+  approvalRequests ApprovalRequest[]
+
+  @@index([signalId, status])
+  @@index([workspaceId, status])
+  @@map("response_drafts")
+}
+
+model ResponseDraftVersion {
+  id        String    @id @default(uuid())
+  draftId   String
+  version   Int
+  content   String
+  ctaText   String?
+  riskLevel RiskLevel @default(MEDIUM)
+  createdBy String?
+  createdAt DateTime  @default(now())
+
+  draft ResponseDraft @relation(fields: [draftId], references: [id], onDelete: Cascade)
+
+  @@map("response_draft_versions")
+}
+
+model DeliveryAttempt {
+  id               String         @id @default(uuid())
+  signalId         String
+  draftId          String
+  platform         PlatformType
+  status           DeliveryStatus @default(QUEUED)
+  idempotencyKey   String         @unique
+  attemptNumber    Int            @default(1)
+  providerResponse Json?
+  rateLimitHit     Boolean        @default(false)
+  retryAfter       DateTime?
+  deliveredAt      DateTime?
+  failedAt         DateTime?
+  errorMessage     String?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  signal NormalizedSignal @relation(fields: [signalId], references: [id], onDelete: Cascade)
+  draft  ResponseDraft    @relation(fields: [draftId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+  @@index([signalId, status])
+  @@map("delivery_attempts")
+}
+
+model Campaign {
+  id          String         @id @default(uuid())
+  workspaceId String
+  name        String
+  description String?
+  objective   String?
+  status      CampaignStatus @default(DRAFT)
+  startDate   DateTime?
+  endDate     DateTime?
+  settings    Json           @default("{}")
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  workspace Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  drafts    ResponseDraft[]
+
+  @@map("campaigns")
+}
+
+model AuditLog {
+  id           String   @id @default(uuid())
+  tenantId     String
+  actorId      String?
+  actorType    String   @default("user")
+  action       String
+  resourceType String
+  resourceId   String?
+  context      Json     @default("{}")
+  ipAddress    String?
+  createdAt    DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  actor  User?  @relation("AuditActor", fields: [actorId], references: [id])
+
+  @@index([tenantId, createdAt])
+  @@index([resourceType, resourceId])
+  @@map("audit_logs")
+}
+
+model RetryJob {
+  id          String         @id @default(uuid())
+  queueName   String
+  jobId       String
+  payload     Json
+  status      RetryJobStatus @default(PENDING)
+  attempts    Int            @default(0)
+  maxAttempts Int            @default(3)
+  lastError   String?
+  nextRetryAt DateTime?
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  @@map("retry_jobs")
+}
+
+model RateLimitSnapshot {
+  id         String       @id @default(uuid())
+  platform   PlatformType
+  endpoint   String
+  limit      Int
+  remaining  Int
+  resetsAt   DateTime
+  capturedAt DateTime     @default(now())
+
+  @@map("rate_limit_snapshots")
+}
+
+model SystemHealthCheck {
+  id        String   @id @default(uuid())
+  service   String
+  status    String
+  details   Json     @default("{}")
+  checkedAt DateTime @default(now())
+
+  @@map("system_health_checks")
+}
+
+model Notification {
+  id         String   @id @default(uuid())
+  userId     String
+  type       String // escalation, approval, delivery_failure, system
+  title      String
+  body       String
+  resourceId String?
+  isRead     Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isRead])
+  @@map("notifications")
+}
+
+// ═══════════════════════════════════════
+// PRD ALIGNMENT — NEW MODELS
+// ═══════════════════════════════════════
+
+model IngestBatch {
+  id             String   @id @default(uuid())
+  workspaceId    String
+  idempotencyKey String
+  payloadHash    String
+  insertedCount  Int      @default(0)
+  dedupedCount   Int      @default(0)
+  rejectedCount  Int      @default(0)
+  insertedIds    String[] @default([])
+  response       Json     @default("{}")
+  createdAt      DateTime @default(now())
+
+  @@unique([workspaceId, idempotencyKey])
+  @@index([workspaceId, createdAt])
+  @@map("ingest_batches")
+}
+
+model AgentRun {
+  id           String         @id @default(uuid())
+  workspaceId  String
+  agentName    String
+  inputJson    Json
+  outputJson   Json?
+  status       AgentRunStatus @default(SUCCESS)
+  modelName    String?
+  tokenCount   Int?
+  latencyMs    Int?
+  errorMessage String?
+  createdAt    DateTime       @default(now())
+
+  @@index([workspaceId, createdAt])
+  @@index([agentName])
+  @@map("agent_runs")
+}
+
+model RiskEvent {
+  id          String            @id @default(uuid())
+  workspaceId String
+  draftId     String?
+  signalId    String?
+  category    RiskEventCategory
+  severity    RiskLevel
+  status      RiskEventStatus   @default(OPEN)
+  description String?
+  metadata    Json              @default("{}")
+  resolvedBy  String?
+  resolvedAt  DateTime?
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  @@index([workspaceId, status])
+  @@index([workspaceId, severity])
+  @@map("risk_events")
+}
+
+model Shortlink {
+  id             String   @id @default(uuid())
+  workspaceId    String
+  code           String   @unique
+  destinationUrl String
+  utmSource      String?
+  utmMedium      String?
+  utmCampaign    String?
+  utmContent     String?
+  clickCount     Int      @default(0)
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  clicks ShortlinkClick[]
+
+  @@index([workspaceId])
+  @@map("shortlinks")
+}
+
+model ShortlinkClick {
+  id          String   @id @default(uuid())
+  shortlinkId String
+  ipHash      String?
+  userAgent   String?
+  referrer    String?
+  createdAt   DateTime @default(now())
+
+  shortlink Shortlink @relation(fields: [shortlinkId], references: [id], onDelete: Cascade)
+
+  @@index([shortlinkId, createdAt])
+  @@map("shortlink_clicks")
+}
